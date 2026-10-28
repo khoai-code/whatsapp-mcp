@@ -1,7 +1,7 @@
 import sqlite3
 from datetime import datetime
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict
+from typing import Optional, List, Tuple, Dict, Any
 import os.path
 import requests
 import json
@@ -734,6 +734,18 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
         return False, f"Error parsing response: {response.text}"
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
+
+def get_status() -> Dict[str, Any]:
+    """Ask the bridge for connection and write-policy state."""
+    try:
+        response = requests.get(f"{WHATSAPP_API_BASE_URL}/status", headers=_bridge_headers(), timeout=5)
+    except requests.RequestException:
+        return {"bridge_running": False, "message": "WhatsApp bridge is not running on 127.0.0.1:8080."}
+    except RuntimeError as e:
+        return {"bridge_running": False, "message": str(e)}
+    if response.status_code != 200:
+        return {"bridge_running": True, "message": f"Bridge returned HTTP {response.status_code}"}
+    return {"bridge_running": True, **response.json()}
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.

@@ -1,3 +1,4 @@
+import os
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 from whatsapp import (
@@ -12,8 +13,14 @@ from whatsapp import (
     send_message as whatsapp_send_message,
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
-    download_media as whatsapp_download_media
+    download_media as whatsapp_download_media,
+    get_status as whatsapp_get_status
 )
+
+# Write tools (send, group admin) are only registered when this is "true".
+# Unregistered tools are invisible to Claude, so message text can't trick it
+# into calling them. The bridge enforces the same flag independently.
+WRITE_ENABLED = os.environ.get("WHATSAPP_MCP_ALLOW_WRITE", "").strip().lower() == "true"
 
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
@@ -154,72 +161,79 @@ def get_message_context(
     context = whatsapp_get_message_context(message_id, before, after)
     return context
 
-@mcp.tool()
-def send_message(
-    recipient: str,
-    message: str
-) -> Dict[str, Any]:
-    """Send a WhatsApp message to a person or group. For group chats use the JID.
+if WRITE_ENABLED:
+    @mcp.tool()
+    def send_message(
+        recipient: str,
+        message: str
+    ) -> Dict[str, Any]:
+        """Send a WhatsApp message to a person or group. For group chats use the JID.
 
-    Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        message: The message text to send
+        WARNING: This sends from the user's real WhatsApp account. The recipient sees it as coming from them and it cannot be unsent.
+
+        Args:
+            recipient: The recipient - either a phone number with country code but no + or other symbols,
+                     or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+            message: The message text to send
     
-    Returns:
-        A dictionary containing success status and a status message
-    """
-    # Validate input
-    if not recipient:
+        Returns:
+            A dictionary containing success status and a status message
+        """
+        # Validate input
+        if not recipient:
+            return {
+                "success": False,
+                "message": "Recipient must be provided"
+            }
+    
+        # Call the whatsapp_send_message function with the unified recipient parameter
+        success, status_message = whatsapp_send_message(recipient, message)
         return {
-            "success": False,
-            "message": "Recipient must be provided"
+            "success": success,
+            "message": status_message
         }
-    
-    # Call the whatsapp_send_message function with the unified recipient parameter
-    success, status_message = whatsapp_send_message(recipient, message)
-    return {
-        "success": success,
-        "message": status_message
-    }
 
-@mcp.tool()
-def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
-    """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
-    
-    Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the media file to send (image, video, document)
-    
-    Returns:
-        A dictionary containing success status and a status message
-    """
-    
-    # Call the whatsapp_send_file function
-    success, status_message = whatsapp_send_file(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
-    }
+    @mcp.tool()
+    def send_file(recipient: str, media_path: str) -> Dict[str, Any]:
+        """Send a file such as a picture, raw audio, video or document via WhatsApp to the specified recipient. For group messages use the JID.
 
-@mcp.tool()
-def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
-    """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
+        WARNING: This sends from the user's real WhatsApp account. The recipient sees it as coming from them and it cannot be unsent.
     
-    Args:
-        recipient: The recipient - either a phone number with country code but no + or other symbols,
-                 or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
-        media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+        Args:
+            recipient: The recipient - either a phone number with country code but no + or other symbols,
+                     or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+            media_path: The absolute path to the media file to send (image, video, document)
     
-    Returns:
-        A dictionary containing success status and a status message
-    """
-    success, status_message = whatsapp_audio_voice_message(recipient, media_path)
-    return {
-        "success": success,
-        "message": status_message
-    }
+        Returns:
+            A dictionary containing success status and a status message
+        """
+    
+        # Call the whatsapp_send_file function
+        success, status_message = whatsapp_send_file(recipient, media_path)
+        return {
+            "success": success,
+            "message": status_message
+        }
+
+    @mcp.tool()
+    def send_audio_message(recipient: str, media_path: str) -> Dict[str, Any]:
+        """Send any audio file as a WhatsApp audio message to the specified recipient. For group messages use the JID. If it errors due to ffmpeg not being installed, use send_file instead.
+
+        WARNING: This sends from the user's real WhatsApp account. The recipient sees it as coming from them and it cannot be unsent.
+    
+        Args:
+            recipient: The recipient - either a phone number with country code but no + or other symbols,
+                     or a JID (e.g., "123456789@s.whatsapp.net" or a group JID like "123456789@g.us")
+            media_path: The absolute path to the audio file to send (will be converted to Opus .ogg if it's not a .ogg file)
+    
+        Returns:
+            A dictionary containing success status and a status message
+        """
+        success, status_message = whatsapp_audio_voice_message(recipient, media_path)
+        return {
+            "success": success,
+            "message": status_message
+        }
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
@@ -245,6 +259,15 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
             "success": False,
             "message": "Failed to download media"
         }
+
+@mcp.tool()
+def get_status() -> Dict[str, Any]:
+    """Check the WhatsApp connection: whether the bridge is running and connected,
+    the paired phone number, and whether sending is enabled and limited by an allowlist.
+    """
+    status = whatsapp_get_status()
+    status["write_tools_registered"] = WRITE_ENABLED
+    return status
 
 if __name__ == "__main__":
     # Initialize and run the server

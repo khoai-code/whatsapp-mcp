@@ -675,6 +675,24 @@ func extractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
+// StatusResponse reports bridge state for the get_status tool
+type StatusResponse struct {
+	Connected       bool   `json:"connected"`
+	LoggedIn        bool   `json:"logged_in"`
+	PairedNumber    string `json:"paired_number,omitempty"`
+	WriteEnabled    bool   `json:"write_enabled"`
+	AllowlistActive bool   `json:"allowlist_active"`
+	AllowlistSize   int    `json:"allowlist_size"`
+	MediaDir        string `json:"media_dir,omitempty"`
+}
+
+// writeForbidden rejects a write blocked by the write policy
+func writeForbidden(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusForbidden)
+	json.NewEncoder(w).Encode(SendMessageResponse{Success: false, Message: err.Error()})
+}
+
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
 	token, err := loadOrCreateToken()
@@ -682,6 +700,12 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Printf("REST API server not started: %v\n", err)
 		return
 	}
+	policy, err := loadWritePolicy()
+	if err != nil {
+		fmt.Printf("REST API server not started: %v\n", err)
+		return
+	}
+	fmt.Printf("Write enabled: %t, allowlist entries: %d\n", policy.allowWrite, len(policy.allowlist))
 	mux := http.NewServeMux()
 
 	// Handler for sending messages
@@ -707,6 +731,15 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 		if req.Message == "" && req.MediaPath == "" {
 			http.Error(w, "Message or media path is required", http.StatusBadRequest)
+			return
+		}
+
+		if err := policy.checkWrite(req.Recipient); err != nil {
+			writeForbidden(w, err)
+			return
+		}
+		if err := policy.checkMediaPath(req.MediaPath); err != nil {
+			writeForbidden(w, err)
 			return
 		}
 
@@ -779,6 +812,27 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 			Filename: filename,
 			Path:     path,
 		})
+	})
+
+	// Handler for bridge status (read-only)
+	mux.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		status := StatusResponse{
+			Connected:       client.IsConnected(),
+			LoggedIn:        client.IsLoggedIn(),
+			WriteEnabled:    policy.allowWrite,
+			AllowlistActive: len(policy.allowlist) > 0,
+			AllowlistSize:   len(policy.allowlist),
+			MediaDir:        policy.mediaDir,
+		}
+		if client.Store.ID != nil {
+			status.PairedNumber = client.Store.ID.User
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(status)
 	})
 
 	// Start the server
