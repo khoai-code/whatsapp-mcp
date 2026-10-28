@@ -1,3 +1,10 @@
 *.db
 claude_desktop_config.json
 whatsapp.log
+# Bridge state: session keys, message DB, API token, downloaded media
+store/
+*.token
+.env
+.env.*
+*.png
+!example-use.png
