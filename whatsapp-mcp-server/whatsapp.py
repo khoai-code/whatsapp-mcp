@@ -1,4 +1,7 @@
+import builtins
+import functools
 import sqlite3
+import sys
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
@@ -9,6 +12,9 @@ import audio
 
 MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
 WHATSAPP_API_BASE_URL = "http://127.0.0.1:8080/api"
+# MCP stdio uses stdout for the protocol; diagnostics must go to stderr.
+print = functools.partial(builtins.print, file=sys.stderr)
+
 BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'bridge.token')
 
 
@@ -102,36 +108,6 @@ def get_sender_name(sender_jid: str) -> str:
         if 'conn' in locals():
             conn.close()
 
-def format_message(message: Message, show_chat_info: bool = True) -> None:
-    """Print a single message with consistent formatting."""
-    output = ""
-    
-    if show_chat_info and message.chat_name:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] Chat: {message.chat_name} "
-    else:
-        output += f"[{message.timestamp:%Y-%m-%d %H:%M:%S}] "
-        
-    content_prefix = ""
-    if hasattr(message, 'media_type') and message.media_type:
-        content_prefix = f"[{message.media_type} - Message ID: {message.id} - Chat JID: {message.chat_jid}] "
-    
-    try:
-        sender_name = get_sender_name(message.sender) if not message.is_from_me else "Me"
-        output += f"From: {sender_name}: {content_prefix}{message.content}\n"
-    except Exception as e:
-        print(f"Error formatting message: {e}")
-    return output
-
-def format_messages_list(messages: List[Message], show_chat_info: bool = True) -> None:
-    output = ""
-    if not messages:
-        output += "No messages to display."
-        return output
-    
-    for message in messages:
-        output += format_message(message, show_chat_info)
-    return output
-
 def list_messages(
     after: Optional[str] = None,
     before: Optional[str] = None,
@@ -139,12 +115,9 @@ def list_messages(
     chat_jid: Optional[str] = None,
     query: Optional[str] = None,
     limit: int = 20,
-    page: int = 0,
-    include_context: bool = True,
-    context_before: int = 1,
-    context_after: int = 1
+    page: int = 0
 ) -> List[Message]:
-    """Get messages matching the specified criteria with optional context."""
+    """Get messages matching the specified criteria, newest first."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
         cursor = conn.cursor()
@@ -196,11 +169,8 @@ def list_messages(
         params.extend([limit, offset])
         
         cursor.execute(" ".join(query_parts), tuple(params))
-        messages = cursor.fetchall()
-        
-        result = []
-        for msg in messages:
-            message = Message(
+        return [
+            Message(
                 timestamp=datetime.fromisoformat(msg[0]),
                 sender=msg[1],
                 chat_name=msg[2],
@@ -210,22 +180,9 @@ def list_messages(
                 id=msg[6],
                 media_type=msg[7]
             )
-            result.append(message)
-            
-        if include_context and result:
-            # Add context for each message
-            messages_with_context = []
-            for msg in result:
-                context = get_message_context(msg.id, context_before, context_after)
-                messages_with_context.extend(context.before)
-                messages_with_context.append(context.message)
-                messages_with_context.extend(context.after)
-            
-            return format_messages_list(messages_with_context, show_chat_info=True)
-            
-        # Format and display messages without context
-        return format_messages_list(result, show_chat_info=True)    
-        
+            for msg in cursor.fetchall()
+        ]
+
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return []
@@ -345,11 +302,12 @@ def list_chats(
                 chats.jid,
                 chats.name,
                 chats.last_message_time,
-                messages.content as last_message,
-                messages.sender as last_sender,
-                messages.is_from_me as last_is_from_me
+                {last_columns}
             FROM chats
-        """]
+        """.format(last_columns=(
+            "messages.content, messages.sender, messages.is_from_me"
+            if include_last_message else "NULL, NULL, NULL"
+        ))]
         
         if include_last_message:
             query_parts.append("""
@@ -401,7 +359,7 @@ def list_chats(
             conn.close()
 
 
-def search_contacts(query: str) -> List[Contact]:
+def search_contacts(query: str, limit: int = 20) -> List[Contact]:
     """Search contacts by name or phone number."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
@@ -419,8 +377,8 @@ def search_contacts(query: str) -> List[Contact]:
                 (LOWER(name) LIKE LOWER(?) OR LOWER(jid) LIKE LOWER(?))
                 AND jid NOT LIKE '%@g.us'
             ORDER BY name, jid
-            LIMIT 50
-        """, (search_pattern, search_pattern))
+            LIMIT ?
+        """, (search_pattern, search_pattern, limit))
         
         contacts = cursor.fetchall()
         
@@ -494,7 +452,7 @@ def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Chat]:
             conn.close()
 
 
-def get_last_interaction(jid: str) -> str:
+def get_last_interaction(jid: str) -> Optional[Message]:
     """Get most recent message involving the contact."""
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
@@ -533,11 +491,34 @@ def get_last_interaction(jid: str) -> str:
             media_type=msg_data[7]
         )
         
-        return format_message(message)
+        return message
         
     except sqlite3.Error as e:
         print(f"Database error: {e}")
         return None
+    finally:
+        if 'conn' in locals():
+            conn.close()
+
+
+def recent_activity(after: datetime, limit: int = 20) -> List[Tuple[str, Optional[str], int, Optional[str]]]:
+    """Per-chat message counts since `after`, busiest first: (jid, name, count, last_timestamp)."""
+    try:
+        conn = sqlite3.connect(MESSAGES_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT c.jid, c.name, COUNT(*) AS n, MAX(m.timestamp)
+            FROM messages m
+            JOIN chats c ON m.chat_jid = c.jid
+            WHERE m.timestamp > ?
+            GROUP BY c.jid
+            ORDER BY n DESC, MAX(m.timestamp) DESC
+            LIMIT ?
+        """, (after, limit))
+        return cursor.fetchall()
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+        return []
     finally:
         if 'conn' in locals():
             conn.close()
