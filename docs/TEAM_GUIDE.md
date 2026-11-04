@@ -13,8 +13,7 @@ You need: a Mac, the **Claude desktop app**, and your phone with WhatsApp.
 
 ## 1. Install (one click)
 
-1. Download **`whatsapp-mcp.mcpb`** from the
-   [latest release](https://github.com/khoai-code/whatsapp-mcp/releases/latest).
+1. Save the **`whatsapp-mcp.mcpb`** file Khanh sent you.
 2. Double-click it. Claude Desktop opens and asks to install **WhatsApp**: click **Install**.
 
 That's it. Nothing else to install.

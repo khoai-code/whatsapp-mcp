@@ -25,8 +25,8 @@ and hardened for team use.
 
 ## Easiest: Claude Desktop extension
 
-Download `whatsapp-mcp.mcpb` from the [latest release](https://github.com/khoai-code/whatsapp-mcp/releases/latest),
-double-click it, then ask Claude to *"connect my WhatsApp"*. No terminal needed.
+Ask Khanh for `whatsapp-mcp.mcpb`, double-click it, then ask Claude to *"connect my WhatsApp"*.
+No terminal needed.
 Full steps: [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md).
 
 The rest of this README covers the terminal install, for Claude Code. To build the
