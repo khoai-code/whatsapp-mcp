@@ -23,7 +23,16 @@ and hardened for team use.
 - Upload your chat history. Only the messages Claude actually looks up are sent to Claude,
   as part of your conversation, the same as if you had pasted them in.
 
-## Install (about 5 minutes)
+## Easiest: Claude Desktop extension
+
+Download `whatsapp-mcp.mcpb` from the [latest release](https://github.com/khoai-code/whatsapp-mcp/releases/latest),
+double-click it, then ask Claude to *"connect my WhatsApp"*. No terminal needed.
+Full steps: [docs/TEAM_GUIDE.md](docs/TEAM_GUIDE.md).
+
+The rest of this README covers the terminal install, for Claude Code. To build the
+extension yourself: `./scripts/build-mcpb.sh` (needs Go, Xcode command line tools, Node).
+
+## Terminal install (about 5 minutes)
 
 You need macOS, [Homebrew](https://brew.sh), and Claude Code or Claude Desktop.
 

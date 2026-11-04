@@ -734,7 +734,7 @@ func writeForbidden(w http.ResponseWriter, err error) {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int, pairing *pairManager) {
 	token, err := loadOrCreateToken()
 	if err != nil {
 		fmt.Printf("REST API server not started: %v\n", err)
@@ -764,6 +764,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		},
 	}
 	groups.register(mux)
+	pairing.register(mux)
 
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
@@ -909,8 +910,20 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
-	if err := loadConfigFile(configFile); err != nil {
-		logger.Errorf("Failed to read %s: %v", configFile, err)
+	// The desktop extension keeps its data outside the repo and pairs over
+	// the local API instead of a terminal QR code.
+	dataDir := os.Getenv("WHATSAPP_MCP_DATA_DIR")
+	pairViaAPI := strings.EqualFold(strings.TrimSpace(os.Getenv("WHATSAPP_MCP_PAIR_API")), "true")
+	if err := useDataDir(dataDir); err != nil {
+		logger.Errorf("%v", err)
+		return
+	}
+	cfg := configFile
+	if dataDir != "" {
+		cfg = ".env"
+	}
+	if err := loadConfigFile(cfg); err != nil {
+		logger.Errorf("Failed to read %s: %v", cfg, err)
 		return
 	}
 
@@ -920,6 +933,13 @@ func main() {
 	// Create directory for database if it doesn't exist
 	if err := secureStore(); err != nil {
 		logger.Errorf("%v", err)
+		return
+	}
+	if ok, err := lockStore(); err != nil {
+		logger.Errorf("Failed to lock store: %v", err)
+		return
+	} else if !ok {
+		logger.Infof("Another bridge is already running for this account; exiting.")
 		return
 	}
 
@@ -986,9 +1006,18 @@ func main() {
 
 	// Create channel to track connection success
 	connected := make(chan bool, 1)
+	pairing := newPairManager(client)
+	port := bridgePort()
 
 	// Connect to WhatsApp
-	if client.Store.ID == nil {
+	if client.Store.ID == nil && pairViaAPI {
+		// Wait for the user to ask for a code (connect_whatsapp tool); once
+		// paired, whatsmeow reconnects by itself and the API carries on.
+		startRESTServer(client, messageStore, port, pairing)
+		logger.Infof("Not linked to a phone yet; waiting for a pairing request over the local API.")
+		waitForExit(client)
+		return
+	} else if client.Store.ID == nil {
 		// No ID stored, this is a new client, need to pair with phone.
 		// A QR code in a background log is useless, so only pair from a terminal.
 		if !interactive() {
@@ -1042,19 +1071,17 @@ func main() {
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
 	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
+	startRESTServer(client, messageStore, port, pairing)
+	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
+	waitForExit(client)
+}
 
-	// Create a channel to keep the main goroutine alive
+// waitForExit blocks until SIGINT/SIGTERM, then disconnects cleanly.
+func waitForExit(client *whatsmeow.Client) {
 	exitChan := make(chan os.Signal, 1)
 	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
-
-	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
-
-	// Wait for termination signal
 	<-exitChan
-
 	fmt.Println("Disconnecting...")
-	// Disconnect client
 	client.Disconnect()
 }
 

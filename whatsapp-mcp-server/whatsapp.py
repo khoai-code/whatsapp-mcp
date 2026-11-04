@@ -6,17 +6,81 @@ from datetime import datetime
 from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict, Any
 import os.path
+import subprocess
+import time
 import requests
 import json
 import audio
 
-MESSAGES_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'messages.db')
-WHATSAPP_API_BASE_URL = "http://127.0.0.1:8080/api"
+# The repo install keeps the bridge's data next to it; the desktop extension
+# sets WHATSAPP_MCP_DATA_DIR to a private folder outside the bundle.
+DATA_DIR = os.environ.get("WHATSAPP_MCP_DATA_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge')
+STORE_DIR = os.path.join(DATA_DIR, 'store')
+
+MESSAGES_DB_PATH = os.path.join(STORE_DIR, 'messages.db')
+BRIDGE_PORT = int(os.environ.get("WHATSAPP_MCP_BRIDGE_PORT") or 8080)
+WHATSAPP_API_BASE_URL = f"http://127.0.0.1:{BRIDGE_PORT}/api"
 # MCP stdio uses stdout for the protocol; diagnostics must go to stderr.
 print = functools.partial(builtins.print, file=sys.stderr)
 
-SESSION_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
-BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'bridge.token')
+SESSION_DB_PATH = os.path.join(STORE_DIR, 'whatsapp.db')
+BRIDGE_TOKEN_PATH = os.path.join(STORE_DIR, 'bridge.token')
+
+# Set by the desktop extension: this server then starts the bundled bridge
+# itself. The repo install leaves the bridge to its LaunchAgent.
+BRIDGE_BIN = os.environ.get("WHATSAPP_MCP_BRIDGE_BIN")
+BRIDGE_LOG_PATH = os.path.join(DATA_DIR, 'bridge.log')
+_bridge_proc: Optional[subprocess.Popen] = None
+
+
+def _bridge_reachable() -> bool:
+    try:
+        requests.get(f"{WHATSAPP_API_BASE_URL}/status", timeout=1)
+        return True
+    except requests.RequestException:
+        return False
+
+
+def ensure_bridge(wait_seconds: float = 10.0) -> Optional[str]:
+    """Start the bundled bridge if this is the extension and it isn't running.
+
+    Returns None when the bridge is (or should be) available, else an error.
+    Another copy of this server may already have started it; that one is reused.
+    """
+    global _bridge_proc
+    if not BRIDGE_BIN or _bridge_reachable():
+        return None
+    if _bridge_proc is None or _bridge_proc.poll() is not None:
+        os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+        # The log has phone numbers in it: keep it private like the store.
+        log = os.fdopen(os.open(BRIDGE_LOG_PATH, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+        os.chmod(BRIDGE_LOG_PATH, 0o600)
+        _bridge_proc = subprocess.Popen(
+            [BRIDGE_BIN],
+            cwd=DATA_DIR,
+            env={**os.environ, "WHATSAPP_MCP_PAIR_API": "true"},
+            stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+        )
+        log.close()
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if _bridge_reachable():
+            return None
+        if _bridge_proc.poll() is not None:
+            return f"The WhatsApp bridge stopped unexpectedly. Details are in {BRIDGE_LOG_PATH}."
+        time.sleep(0.25)
+    return "The WhatsApp bridge is taking too long to start. Try again in a moment."
+
+
+def stop_bridge() -> None:
+    """Stop the bridge if this process started it."""
+    if _bridge_proc is not None and _bridge_proc.poll() is None:
+        _bridge_proc.terminate()
+        try:
+            _bridge_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _bridge_proc.kill()
 
 
 def _bridge_headers() -> Dict[str, str]:
@@ -25,6 +89,8 @@ def _bridge_headers() -> Dict[str, str]:
         with open(BRIDGE_TOKEN_PATH) as f:
             token = f.read().strip()
     except FileNotFoundError:
+        if BRIDGE_BIN:
+            raise RuntimeError("The WhatsApp bridge is still starting. Try again in a moment.")
         raise RuntimeError(
             "WhatsApp bridge has not started yet (no API token). "
             "Run `make status` in the whatsapp-mcp folder; if the phone isn't linked, run `make pair`."
@@ -754,6 +820,9 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
 
 def bridge_call(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Tuple[bool, Any]:
     """Call the bridge API. Returns (ok, parsed JSON) or (False, error message)."""
+    error = ensure_bridge()
+    if error:
+        return False, error
     try:
         response = requests.request(
             method, f"{WHATSAPP_API_BASE_URL}{path}", json=payload, headers=_bridge_headers(), timeout=30
@@ -773,15 +842,21 @@ def bridge_call(method: str, path: str, payload: Optional[Dict[str, Any]] = None
 
 def get_status() -> Dict[str, Any]:
     """Ask the bridge for connection and write-policy state."""
+    error = ensure_bridge()
+    if error:
+        return {"bridge_running": False, "message": error}
     try:
         response = requests.get(f"{WHATSAPP_API_BASE_URL}/status", headers=_bridge_headers(), timeout=5)
     except requests.RequestException:
-        return {"bridge_running": False, "message": "WhatsApp bridge is not running on 127.0.0.1:8080."}
+        return {"bridge_running": False, "message": f"WhatsApp bridge is not running on 127.0.0.1:{BRIDGE_PORT}."}
     except RuntimeError as e:
         return {"bridge_running": False, "message": str(e)}
     if response.status_code != 200:
         return {"bridge_running": True, "message": f"Bridge returned HTTP {response.status_code}"}
-    return {"bridge_running": True, **response.json()}
+    status = {"bridge_running": True, **response.json()}
+    if not status.get("logged_in"):
+        status["message"] = "Not linked to a phone yet. Use connect_whatsapp with your phone number to link it."
+    return status
 
 def download_media(message_id: str, chat_jid: str) -> Optional[str]:
     """Download media from a message and return the local file path.

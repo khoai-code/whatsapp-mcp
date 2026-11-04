@@ -23,12 +23,22 @@ type writePolicy struct {
 
 var errWriteDisabled = errors.New("writing is disabled: start the bridge with WHATSAPP_MCP_ALLOW_WRITE=true to send messages")
 
+// setting reads an env var, treating an unsubstituted "${...}" placeholder
+// (an empty field in the desktop extension's settings) as unset.
+func setting(name string) string {
+	v := strings.TrimSpace(os.Getenv(name))
+	if strings.HasPrefix(v, "${") {
+		return ""
+	}
+	return v
+}
+
 func loadWritePolicy() (*writePolicy, error) {
 	p := &writePolicy{
-		allowWrite: strings.EqualFold(strings.TrimSpace(os.Getenv("WHATSAPP_MCP_ALLOW_WRITE")), "true"),
+		allowWrite: strings.EqualFold(setting("WHATSAPP_MCP_ALLOW_WRITE"), "true"),
 		allowlist:  map[string]bool{},
 	}
-	for _, entry := range strings.Split(os.Getenv("WHATSAPP_MCP_SEND_ALLOWLIST"), ",") {
+	for _, entry := range strings.Split(setting("WHATSAPP_MCP_SEND_ALLOWLIST"), ",") {
 		if strings.TrimSpace(entry) == "" {
 			continue
 		}
@@ -42,7 +52,7 @@ func loadWritePolicy() (*writePolicy, error) {
 	if p.storeDir, err = realPath(storeDir); err != nil {
 		return nil, err
 	}
-	if dir := strings.TrimSpace(os.Getenv("WHATSAPP_MCP_MEDIA_DIR")); dir != "" {
+	if dir := setting("WHATSAPP_MCP_MEDIA_DIR"); dir != "" {
 		if p.mediaDir, err = realPath(dir); err != nil {
 			return nil, fmt.Errorf("invalid WHATSAPP_MCP_MEDIA_DIR: %v", err)
 		}
