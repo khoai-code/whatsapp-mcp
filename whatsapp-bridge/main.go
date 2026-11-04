@@ -708,6 +708,18 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	fmt.Printf("Write enabled: %t, allowlist entries: %d\n", policy.allowWrite, len(policy.allowlist))
 	mux := http.NewServeMux()
 
+	groups := &groupHandlers{
+		api:    client,
+		policy: policy,
+		ownUser: func() string {
+			if client.Store.ID == nil {
+				return ""
+			}
+			return client.Store.ID.User
+		},
+	}
+	groups.register(mux)
+
 	// Handler for sending messages
 	mux.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests

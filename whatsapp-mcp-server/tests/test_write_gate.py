@@ -7,8 +7,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-WRITE_TOOLS = {"send_message", "send_file", "send_audio_message"}
-READ_TOOLS = {"list_chats", "list_messages", "download_media", "get_status"}
+WRITE_TOOLS = {
+    "send_message", "send_file", "send_audio_message",
+    "create_group", "add_participants", "remove_participants", "promote_admin",
+    "demote_admin", "set_group_name", "set_group_description", "leave_group", "mark_read",
+}
+READ_TOOLS = {
+    "list_chats", "list_messages", "download_media", "get_status", "recent_activity",
+    "list_groups", "get_group_info", "get_group_invite_link",
+}
 
 
 def load_server(monkeypatch, allow_write):
