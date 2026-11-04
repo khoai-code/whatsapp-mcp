@@ -18,7 +18,8 @@ from whatsapp import (
     download_media as whatsapp_download_media,
     get_status as whatsapp_get_status,
     get_sender_name as whatsapp_get_sender_name,
-    recent_activity as whatsapp_recent_activity
+    recent_activity as whatsapp_recent_activity,
+    bridge_call
 )
 
 # Write tools (send, group admin) are only registered when this is "true".
@@ -245,6 +246,72 @@ def get_message_context(
     messages = list(reversed(ctx.before)) + [ctx.message] + ctx.after
     return "\n".join(fmt.messages_block(messages, _name_lookup(), highlight_ids={ctx.message.id}))
 
+def _result(ok: bool, body: Any) -> str:
+    """One-line outcome for write tools."""
+    if not ok:
+        return f"error: {body}"
+    line = f"ok: {body.get('message', 'done')}"
+    if body.get("jid"):
+        line += f" · jid {body['jid']}"
+    if body.get("failed"):
+        line += f" · failed: {', '.join(body['failed'])}"
+    return line
+
+
+@mcp.tool()
+def list_groups() -> str:
+    """List WhatsApp groups you are in, live from WhatsApp.
+    One line per group: `name · jid · N members · admin|member`.
+    """
+    ok, body = bridge_call("GET", "/groups")
+    if not ok:
+        return f"error: {body}"
+    if not body:
+        return "You are not in any groups."
+    groups = sorted(body, key=lambda g: (g.get("name") or "").lower())
+    return "\n".join(
+        f"{g.get('name') or '-'} · {g['jid']} · {g['participants']} members · {'admin' if g['is_admin'] else 'member'}"
+        for g in groups
+    )
+
+@mcp.tool()
+def get_group_info(group_jid: str, member_limit: int = fmt.MAX_LIMIT) -> str:
+    """Get a group's details and members, live from WhatsApp.
+    Header line, optional description, then one line per member: `phone · admin|superadmin`.
+
+    Args:
+        group_jid: Group JID (ends with @g.us)
+        member_limit: Maximum members to list (default 100, max 100)
+    """
+    ok, body = bridge_call("POST", "/group/info", {"group_jid": group_jid})
+    if not ok:
+        return f"error: {body}"
+    members = body.get("members") or []
+    flags = [f for f, on in (("locked", body.get("locked")), ("announce-only", body.get("announce"))) if on]
+    header = f"{body.get('name') or '-'} · {body['jid']} · {len(members)} members · you: {'admin' if body.get('is_admin') else 'member'}"
+    if flags:
+        header += " · " + ", ".join(flags)
+    lines = [header]
+    if body.get("description"):
+        lines.append("description: " + fmt.one_line(fmt.truncate(body["description"], 300)))
+    limit = fmt.clamp_limit(member_limit, default=fmt.MAX_LIMIT)
+    for m in members[:limit]:
+        role = "superadmin" if m.get("is_super_admin") else "admin" if m.get("is_admin") else ""
+        lines.append(f"{m['jid'].split('@')[0]}" + (f" · {role}" if role else ""))
+    if len(members) > limit:
+        lines.append(f"(+{len(members) - limit} more members not shown)")
+    return "\n".join(lines)
+
+@mcp.tool()
+def get_group_invite_link(group_jid: str) -> str:
+    """Get a group's existing invite link (admins only). Never resets the link.
+
+    Args:
+        group_jid: Group JID (ends with @g.us)
+    """
+    ok, body = bridge_call("POST", "/group/invite-link", {"group_jid": group_jid})
+    return body["link"] if ok else f"error: {body}"
+
 if WRITE_ENABLED:
     @mcp.tool()
     def send_message(
@@ -318,6 +385,121 @@ if WRITE_ENABLED:
             "success": success,
             "message": status_message
         }
+
+    @mcp.tool()
+    def create_group(name: str, participants: List[str]) -> str:
+        """Create a new WhatsApp group with you as admin.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            name: Group name, 1-25 characters
+            participants: Phone numbers with country code (no +) or ...@s.whatsapp.net JIDs
+        """
+        return _result(*bridge_call("POST", "/group/create", {"name": name, "participants": participants}))
+
+    def _participants(group_jid: str, action: str, participants: List[str]) -> str:
+        return _result(*bridge_call("POST", "/group/participants", {
+            "group_jid": group_jid, "action": action, "participants": participants
+        }))
+
+    @mcp.tool()
+    def add_participants(group_jid: str, participants: List[str]) -> str:
+        """Add people to a group. You must be a group admin.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            participants: Phone numbers with country code (no +) or ...@s.whatsapp.net JIDs
+        """
+        return _participants(group_jid, "add", participants)
+
+    @mcp.tool()
+    def remove_participants(group_jid: str, participants: List[str]) -> str:
+        """Remove people from a group. You must be a group admin.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            participants: Phone numbers with country code (no +) or ...@s.whatsapp.net JIDs
+        """
+        return _participants(group_jid, "remove", participants)
+
+    @mcp.tool()
+    def promote_admin(group_jid: str, participants: List[str]) -> str:
+        """Make group members admins. You must be a group admin.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            participants: Phone numbers with country code (no +) or ...@s.whatsapp.net JIDs
+        """
+        return _participants(group_jid, "promote", participants)
+
+    @mcp.tool()
+    def demote_admin(group_jid: str, participants: List[str]) -> str:
+        """Remove admin rights from group members. You must be a group admin.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            participants: Phone numbers with country code (no +) or ...@s.whatsapp.net JIDs
+        """
+        return _participants(group_jid, "demote", participants)
+
+    @mcp.tool()
+    def set_group_name(group_jid: str, name: str) -> str:
+        """Rename a group. Needs admin if the group's info is locked to admins.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            name: New name, 1-25 characters
+        """
+        return _result(*bridge_call("POST", "/group/name", {"group_jid": group_jid, "name": name}))
+
+    @mcp.tool()
+    def set_group_description(group_jid: str, description: str) -> str:
+        """Set a group's description. Needs admin if the group's info is locked to admins.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+            description: New description; empty string clears it
+        """
+        return _result(*bridge_call("POST", "/group/description", {"group_jid": group_jid, "description": description}))
+
+    @mcp.tool()
+    def leave_group(group_jid: str) -> str:
+        """Leave a group. You can only rejoin if someone re-adds you or sends an invite.
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            group_jid: Group JID (ends with @g.us)
+        """
+        return _result(*bridge_call("POST", "/group/leave", {"group_jid": group_jid}))
+
+    @mcp.tool()
+    def mark_read(chat_jid: str, message_ids: List[str], sender: Optional[str] = None) -> str:
+        """Mark messages as read (sends blue ticks to the sender).
+
+        WARNING: This acts on the user's real WhatsApp account and other people see the change.
+
+        Args:
+            chat_jid: Chat JID the messages are in
+            message_ids: Message ids (from list_messages with show_ids=True)
+            sender: Phone/JID of who sent them; required in group chats
+        """
+        return _result(*bridge_call("POST", "/mark-read", {
+            "chat_jid": chat_jid, "message_ids": message_ids, "sender": sender or ""
+        }))
 
 @mcp.tool()
 def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:

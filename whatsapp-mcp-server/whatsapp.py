@@ -716,6 +716,25 @@ def send_audio_message(recipient: str, media_path: str) -> Tuple[bool, str]:
     except Exception as e:
         return False, f"Unexpected error: {str(e)}"
 
+def bridge_call(method: str, path: str, payload: Optional[Dict[str, Any]] = None) -> Tuple[bool, Any]:
+    """Call the bridge API. Returns (ok, parsed JSON) or (False, error message)."""
+    try:
+        response = requests.request(
+            method, f"{WHATSAPP_API_BASE_URL}{path}", json=payload, headers=_bridge_headers(), timeout=30
+        )
+    except RuntimeError as e:
+        return False, str(e)
+    except requests.RequestException as e:
+        return False, f"WhatsApp bridge is not reachable: {e}"
+    try:
+        body = response.json()
+    except ValueError:
+        return False, f"Bridge returned HTTP {response.status_code}: {response.text.strip()[:200]}"
+    if response.status_code != 200:
+        return False, body.get("message", f"HTTP {response.status_code}") if isinstance(body, dict) else body
+    return True, body
+
+
 def get_status() -> Dict[str, Any]:
     """Ask the bridge for connection and write-policy state."""
     try:
