@@ -72,8 +72,15 @@ pair: build config
 	@echo "On your phone: WhatsApp > Settings > Linked devices > Link a device, then scan."
 	@echo "When you see 'Connected to WhatsApp', press Ctrl+C."
 	@echo
-	-cd $(BRIDGE_DIR) && ./whatsapp-bridge
-	@if [ -f $(PLIST) ]; then $(MAKE) --no-print-directory start; fi
+	@# Ctrl+C also interrupts make, so the hand-back to launchd runs in the same
+	@# shell, which ignores the interrupt and carries on once the bridge exits.
+	@cd $(BRIDGE_DIR) && trap 'echo' INT; ./whatsapp-bridge; \
+	if [ -f $(PLIST) ]; then \
+		launchctl bootout $(DOMAIN)/$(LABEL) 2>/dev/null; \
+		launchctl bootstrap $(DOMAIN) $(PLIST) && \
+		echo "Bridge running in the background. Log: $(LOG_FILE)"; \
+		echo "(make may print 'Interrupt' below; that's expected.)"; \
+	fi
 
 start: $(PLIST)
 	@launchctl bootout $(DOMAIN)/$(LABEL) 2>/dev/null || true

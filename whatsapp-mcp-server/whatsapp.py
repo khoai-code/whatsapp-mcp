@@ -15,6 +15,7 @@ WHATSAPP_API_BASE_URL = "http://127.0.0.1:8080/api"
 # MCP stdio uses stdout for the protocol; diagnostics must go to stderr.
 print = functools.partial(builtins.print, file=sys.stderr)
 
+SESSION_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'whatsapp.db')
 BRIDGE_TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'whatsapp-bridge', 'store', 'bridge.token')
 
 
@@ -67,49 +68,81 @@ class MessageContext:
     before: List[Message]
     after: List[Message]
 
+def _session_db() -> sqlite3.Connection:
+    """Read-only handle on whatsmeow's own store (LID map, contact names)."""
+    return sqlite3.connect(f"file:{SESSION_DB_PATH}?mode=ro", uri=True)
+
+
+def _split_sender(sender_jid: str) -> Tuple[str, Optional[str]]:
+    """Return (user part, server) for a stored sender, which may or may not carry @server."""
+    if "@" in sender_jid:
+        user, server = sender_jid.split("@", 1)
+        return user.split(":", 1)[0], server
+    return sender_jid, None
+
+
+def resolve_phone(sender_jid: str) -> Optional[str]:
+    """Phone number for a sender, mapping WhatsApp LIDs back to phone numbers.
+
+    Newer WhatsApp addresses group members by LID (an internal id) instead of
+    their number; whatsmeow keeps the mapping in whatsmeow_lid_map.
+    """
+    user, server = _split_sender(sender_jid)
+    if server in (None, "s.whatsapp.net") and len(user) < 15:
+        return user
+    try:
+        conn = _session_db()
+        try:
+            row = conn.execute("SELECT pn FROM whatsmeow_lid_map WHERE lid = ?", (user,)).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        row = None
+    if row:
+        return row[0]
+    return user if server == "s.whatsapp.net" else None
+
+
 def get_sender_name(sender_jid: str) -> str:
+    """Best display name for a sender: chat name, then WhatsApp contact name, then +phone."""
+    if not sender_jid:
+        return "-"
+    phone = resolve_phone(sender_jid)
+    user, server = _split_sender(sender_jid)
+    candidates = [sender_jid]
+    if phone:
+        candidates.insert(0, f"{phone}@s.whatsapp.net")
+    if server is None or server == "lid":
+        candidates.append(f"{user}@lid")
+
     try:
         conn = sqlite3.connect(MESSAGES_DB_PATH)
-        cursor = conn.cursor()
-        
-        # First try matching by exact JID
-        cursor.execute("""
-            SELECT name
-            FROM chats
-            WHERE jid = ?
-            LIMIT 1
-        """, (sender_jid,))
-        
-        result = cursor.fetchone()
-        
-        # If no result, try looking for the number within JIDs
-        if not result:
-            # Extract the phone number part if it's a JID
-            if '@' in sender_jid:
-                phone_part = sender_jid.split('@')[0]
-            else:
-                phone_part = sender_jid
-                
-            cursor.execute("""
-                SELECT name
-                FROM chats
-                WHERE jid LIKE ?
-                LIMIT 1
-            """, (f"%{phone_part}%",))
-            
-            result = cursor.fetchone()
-        
-        if result and result[0]:
-            return result[0]
-        else:
-            return sender_jid
-        
+        try:
+            for jid in candidates:
+                row = conn.execute("SELECT name FROM chats WHERE jid = ? AND name IS NOT NULL AND name != ''", (jid,)).fetchone()
+                if row and row[0] != jid.split("@", 1)[0]:
+                    return row[0]
+        finally:
+            conn.close()
     except sqlite3.Error as e:
         print(f"Database error while getting sender name: {e}")
-        return sender_jid
-    finally:
-        if 'conn' in locals():
+
+    try:
+        conn = _session_db()
+        try:
+            for jid in candidates:
+                row = conn.execute(
+                    "SELECT COALESCE(NULLIF(full_name, ''), NULLIF(push_name, ''), NULLIF(business_name, '')) "
+                    "FROM whatsmeow_contacts WHERE their_jid = ? LIMIT 1", (jid,)
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+        finally:
             conn.close()
+    except sqlite3.Error:
+        pass
+
+    return f"+{phone}" if phone else sender_jid
 
 def list_messages(
     after: Optional[str] = None,
