@@ -51,6 +51,7 @@ def server(monkeypatch, tmp_path):
 
     import whatsapp
     monkeypatch.setattr(whatsapp, "MESSAGES_DB_PATH", str(db))
+    monkeypatch.setattr(whatsapp, "SESSION_DB_PATH", str(tmp_path / "no-session.db"))
     import main
     return importlib.reload(main)
 
