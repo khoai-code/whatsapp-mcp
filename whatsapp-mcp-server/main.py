@@ -1,6 +1,8 @@
 import os
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
+import formatting as fmt
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -14,7 +16,9 @@ from whatsapp import (
     send_file as whatsapp_send_file,
     send_audio_message as whatsapp_audio_voice_message,
     download_media as whatsapp_download_media,
-    get_status as whatsapp_get_status
+    get_status as whatsapp_get_status,
+    get_sender_name as whatsapp_get_sender_name,
+    recent_activity as whatsapp_recent_activity
 )
 
 # Write tools (send, group admin) are only registered when this is "true".
@@ -25,15 +29,48 @@ WRITE_ENABLED = os.environ.get("WHATSAPP_MCP_ALLOW_WRITE", "").strip().lower() =
 # Initialize FastMCP server
 mcp = FastMCP("whatsapp")
 
+def _name_lookup():
+    """Sender display names, cached for the duration of one tool call."""
+    cache: Dict[str, str] = {}
+
+    def name(message) -> str:
+        if message.is_from_me:
+            return "Me"
+        if message.sender not in cache:
+            cache[message.sender] = whatsapp_get_sender_name(message.sender)
+        return cache[message.sender]
+    return name
+
+
+def _chat_text(chat) -> str:
+    if chat is None:
+        return "No chat found."
+    last_sender = None
+    if chat.last_message:
+        last_sender = "Me" if chat.last_is_from_me else whatsapp_get_sender_name(chat.last_sender or "")
+    return fmt.chat_line(chat, last_sender)
+
+
+def _chats_text(chats, limit: int, hint: str) -> str:
+    if not chats:
+        return "No chats found."
+    return "\n".join([_chat_text(c) for c in chats] + fmt.more_hint(len(chats), limit, hint))
+
+
 @mcp.tool()
-def search_contacts(query: str) -> List[Dict[str, Any]]:
+def search_contacts(query: str, limit: int = fmt.DEFAULT_LIMIT) -> str:
     """Search WhatsApp contacts by name or phone number.
-    
+    One line per contact: `name · phone · jid`.
+
     Args:
         query: Search term to match against contact names or phone numbers
+        limit: Maximum contacts to return (default 20, max 100)
     """
-    contacts = whatsapp_search_contacts(query)
-    return contacts
+    limit = fmt.clamp_limit(limit)
+    contacts = whatsapp_search_contacts(query, limit)
+    if not contacts:
+        return "No contacts found."
+    return "\n".join(f"{c.name or '-'} · {c.phone_number} · {c.jid}" for c in contacts)
 
 @mcp.tool()
 def list_messages(
@@ -42,124 +79,171 @@ def list_messages(
     sender_phone_number: Optional[str] = None,
     chat_jid: Optional[str] = None,
     query: Optional[str] = None,
-    limit: int = 20,
-    page: int = 0,
-    include_context: bool = True,
+    limit: int = fmt.DEFAULT_LIMIT,
+    include_context: bool = False,
     context_before: int = 1,
-    context_after: int = 1
-) -> List[Dict[str, Any]]:
-    """Get WhatsApp messages matching specified criteria with optional context.
-    
+    context_after: int = 1,
+    show_ids: bool = False
+) -> str:
+    """Get WhatsApp messages, newest page first, shown oldest-to-newest within the page.
+    One line per message: `time · sender · text`, grouped under a `## chat (jid)` header.
+    Bodies over 1,000 chars are truncated. Media shows as `[type id=...]`; fetch it with download_media.
+
+    To page further back, pass the `before` value from the "(more available: ...)" line.
+
     Args:
-        after: Optional ISO-8601 formatted string to only return messages after this date
-        before: Optional ISO-8601 formatted string to only return messages before this date
-        sender_phone_number: Optional phone number to filter messages by sender
-        chat_jid: Optional chat JID to filter messages by chat
-        query: Optional search term to filter messages by content
-        limit: Maximum number of messages to return (default 20)
-        page: Page number for pagination (default 0)
-        include_context: Whether to include messages before and after matches (default True)
-        context_before: Number of messages to include before each match (default 1)
-        context_after: Number of messages to include after each match (default 1)
+        after: Optional ISO-8601 datetime; only messages after this
+        before: Optional ISO-8601 datetime; only messages before this (also the paging cursor)
+        sender_phone_number: Optional sender JID/phone to filter by
+        chat_jid: Optional chat JID to filter by
+        query: Optional text to search for in message bodies
+        limit: Maximum matching messages (default 20, max 100)
+        include_context: Also show messages around each match, marking matches with `>` (default False)
+        context_before: Messages before each match when include_context is set (default 1, max 20)
+        context_after: Messages after each match when include_context is set (default 1, max 20)
+        show_ids: Append message ids, needed for get_message_context (default False)
     """
-    messages = whatsapp_list_messages(
+    limit = fmt.clamp_limit(limit)
+    matches = whatsapp_list_messages(
         after=after,
         before=before,
         sender_phone_number=sender_phone_number,
         chat_jid=chat_jid,
         query=query,
         limit=limit,
-        page=page,
-        include_context=include_context,
-        context_before=context_before,
-        context_after=context_after
     )
-    return messages
+    if not matches:
+        return "No messages found."
+
+    shown = list(reversed(matches))
+    highlight = None
+    if include_context:
+        seen, expanded = set(), []
+        for m in shown:
+            ctx = whatsapp_get_message_context(m.id, fmt.clamp_context(context_before), fmt.clamp_context(context_after))
+            for c in list(reversed(ctx.before)) + [ctx.message] + ctx.after:
+                if (c.id, c.chat_jid) not in seen:
+                    seen.add((c.id, c.chat_jid))
+                    expanded.append(c)
+        shown, highlight = expanded, {m.id for m in matches}
+
+    lines = fmt.messages_block(shown, _name_lookup(), show_ids, highlight)
+    oldest = matches[-1].timestamp.isoformat()
+    lines += fmt.more_hint(len(matches), limit, f'before="{oldest}"')
+    return "\n".join(lines)
 
 @mcp.tool()
 def list_chats(
     query: Optional[str] = None,
-    limit: int = 20,
+    limit: int = fmt.DEFAULT_LIMIT,
     page: int = 0,
     include_last_message: bool = True,
     sort_by: str = "last_active"
-) -> List[Dict[str, Any]]:
-    """Get WhatsApp chats matching specified criteria.
-    
+) -> str:
+    """Get WhatsApp chats. One line per chat:
+    `name · jid · group|direct · last time · sender: preview` (preview capped at 100 chars).
+
     Args:
         query: Optional search term to filter chats by name or JID
-        limit: Maximum number of chats to return (default 20)
+        limit: Maximum chats to return (default 20, max 100)
         page: Page number for pagination (default 0)
-        include_last_message: Whether to include the last message in each chat (default True)
-        sort_by: Field to sort results by, either "last_active" or "name" (default "last_active")
+        include_last_message: Whether to include a preview of the last message (default True)
+        sort_by: "last_active" or "name" (default "last_active")
     """
+    limit = fmt.clamp_limit(limit)
     chats = whatsapp_list_chats(
         query=query,
         limit=limit,
-        page=page,
+        page=max(page, 0),
         include_last_message=include_last_message,
         sort_by=sort_by
     )
-    return chats
+    return _chats_text(chats, limit, f"page={max(page, 0) + 1}")
 
 @mcp.tool()
-def get_chat(chat_jid: str, include_last_message: bool = True) -> Dict[str, Any]:
-    """Get WhatsApp chat metadata by JID.
-    
+def recent_activity(since: str, limit: int = fmt.DEFAULT_LIMIT) -> str:
+    """Which chats had messages since a time, busiest first. Cheap first step before
+    reading or summarising: one line per chat, `name · jid · N msgs · last time`.
+
+    Args:
+        since: ISO-8601 datetime, e.g. "2026-10-29T00:00:00"
+        limit: Maximum chats to return (default 20, max 100)
+    """
+    try:
+        after = datetime.fromisoformat(since)
+    except ValueError:
+        return f"Invalid 'since': {since}. Use ISO-8601, e.g. 2026-10-29T09:00:00."
+    rows = whatsapp_recent_activity(after, fmt.clamp_limit(limit))
+    if not rows:
+        return "No messages in that period."
+    return "\n".join(
+        f"{name or '-'} · {jid} · {count} msgs · last {fmt.fmt_time(datetime.fromisoformat(last)) if last else '-'}"
+        for jid, name, count, last in rows
+    )
+
+@mcp.tool()
+def get_chat(chat_jid: str, include_last_message: bool = True) -> str:
+    """Get one WhatsApp chat by JID, as a single line.
+
     Args:
         chat_jid: The JID of the chat to retrieve
-        include_last_message: Whether to include the last message (default True)
+        include_last_message: Whether to include a preview of the last message (default True)
     """
-    chat = whatsapp_get_chat(chat_jid, include_last_message)
-    return chat
+    return _chat_text(whatsapp_get_chat(chat_jid, include_last_message))
 
 @mcp.tool()
-def get_direct_chat_by_contact(sender_phone_number: str) -> Dict[str, Any]:
-    """Get WhatsApp chat metadata by sender phone number.
-    
+def get_direct_chat_by_contact(sender_phone_number: str) -> str:
+    """Find the direct chat with a phone number, as a single line.
+
     Args:
         sender_phone_number: The phone number to search for
     """
-    chat = whatsapp_get_direct_chat_by_contact(sender_phone_number)
-    return chat
+    return _chat_text(whatsapp_get_direct_chat_by_contact(sender_phone_number))
 
 @mcp.tool()
-def get_contact_chats(jid: str, limit: int = 20, page: int = 0) -> List[Dict[str, Any]]:
-    """Get all WhatsApp chats involving the contact.
-    
+def get_contact_chats(jid: str, limit: int = fmt.DEFAULT_LIMIT, page: int = 0) -> str:
+    """Get chats involving a contact (their direct chat and groups they posted in). One line per chat.
+
     Args:
         jid: The contact's JID to search for
-        limit: Maximum number of chats to return (default 20)
+        limit: Maximum chats to return (default 20, max 100)
         page: Page number for pagination (default 0)
     """
-    chats = whatsapp_get_contact_chats(jid, limit, page)
-    return chats
+    limit = fmt.clamp_limit(limit)
+    chats = whatsapp_get_contact_chats(jid, limit, max(page, 0))
+    return _chats_text(chats, limit, f"page={max(page, 0) + 1}")
 
 @mcp.tool()
 def get_last_interaction(jid: str) -> str:
-    """Get most recent WhatsApp message involving the contact.
-    
+    """Get the most recent WhatsApp message involving a contact, as one line.
+
     Args:
         jid: The JID of the contact to search for
     """
     message = whatsapp_get_last_interaction(jid)
-    return message
+    if message is None:
+        return "No messages found."
+    return "\n".join(fmt.messages_block([message], _name_lookup()))
 
 @mcp.tool()
 def get_message_context(
     message_id: str,
     before: int = 5,
     after: int = 5
-) -> Dict[str, Any]:
-    """Get context around a specific WhatsApp message.
-    
+) -> str:
+    """Get messages around one message (found via list_messages with show_ids). The target is marked `>`.
+
     Args:
         message_id: The ID of the message to get context for
-        before: Number of messages to include before the target message (default 5)
-        after: Number of messages to include after the target message (default 5)
+        before: Messages before the target (default 5, max 20)
+        after: Messages after the target (default 5, max 20)
     """
-    context = whatsapp_get_message_context(message_id, before, after)
-    return context
+    try:
+        ctx = whatsapp_get_message_context(message_id, fmt.clamp_context(before), fmt.clamp_context(after))
+    except ValueError as e:
+        return str(e)
+    messages = list(reversed(ctx.before)) + [ctx.message] + ctx.after
+    return "\n".join(fmt.messages_block(messages, _name_lookup(), highlight_ids={ctx.message.id}))
 
 if WRITE_ENABLED:
     @mcp.tool()
