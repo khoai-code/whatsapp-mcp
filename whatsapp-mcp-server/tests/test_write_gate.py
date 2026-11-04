@@ -13,7 +13,7 @@ WRITE_TOOLS = {
     "demote_admin", "set_group_name", "set_group_description", "leave_group", "mark_read",
 }
 READ_TOOLS = {
-    "list_chats", "list_messages", "download_media", "get_status", "recent_activity",
+    "list_chats", "list_messages", "download_media", "whatsapp_status", "recent_activity",
     "list_groups", "get_group_info", "get_group_invite_link",
 }
 
@@ -52,16 +52,16 @@ def test_write_tool_descriptions_warn(monkeypatch):
             assert "real WhatsApp account" in tool.description
 
 
-def test_get_status_without_bridge(monkeypatch, tmp_path):
+def test_whatsapp_status_without_bridge(monkeypatch, tmp_path):
     server = load_server(monkeypatch, None)
     import whatsapp
     monkeypatch.setattr(whatsapp, "BRIDGE_TOKEN_PATH", str(tmp_path / "missing.token"))
-    status = server.get_status()
+    status = server.whatsapp_status()
     assert status["bridge_running"] is False
     assert status["write_tools_registered"] is False
 
 
-def test_get_status_passes_bridge_state(monkeypatch, tmp_path):
+def test_whatsapp_status_passes_bridge_state(monkeypatch, tmp_path):
     server = load_server(monkeypatch, "true")
     import whatsapp
     token = tmp_path / "bridge.token"
@@ -79,7 +79,7 @@ def test_get_status_passes_bridge_state(monkeypatch, tmp_path):
         return FakeResponse()
 
     monkeypatch.setattr(whatsapp.requests, "get", fake_get)
-    status = server.get_status()
+    status = server.whatsapp_status()
     assert seen["url"].endswith("/api/status")
     assert seen["headers"] == {"Authorization": "Bearer abc"}
     assert status["bridge_running"] and status["connected"]

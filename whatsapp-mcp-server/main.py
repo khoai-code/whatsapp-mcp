@@ -90,6 +90,8 @@ def list_messages(
     show_ids: bool = False
 ) -> str:
     """Get WhatsApp messages, newest page first, shown oldest-to-newest within the page.
+    For "what happened today / since X" across chats, call recent_activity first to see which
+    chats are busy, then read those chats here with chat_jid.
     One line per message: `time · sender · text`, grouped under a `## chat (jid)` header.
     Bodies over 1,000 chars are truncated. Media shows as `[type id=...]`; fetch it with download_media.
 
@@ -530,7 +532,7 @@ def download_media(message_id: str, chat_jid: str) -> Dict[str, Any]:
         }
 
 @mcp.tool()
-def get_status() -> Dict[str, Any]:
+def whatsapp_status() -> Dict[str, Any]:
     """Check the WhatsApp connection: whether the bridge is running and connected,
     the paired phone number, and whether sending is enabled and limited by an allowlist.
     """

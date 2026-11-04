@@ -32,6 +32,9 @@ type groupHandlers struct {
 	// ownIDs returns the paired account's user parts: phone number and, when
 	// known, LID. Groups may list members by either.
 	ownIDs func() []string
+	// onRename, if set, is told about successful renames so the local chat
+	// list shows the new name straight away.
+	onRename func(jid types.JID, name string)
 }
 
 // Group names are limited to 25 characters by WhatsApp.
@@ -395,6 +398,9 @@ func (g *groupHandlers) setName(w http.ResponseWriter, r *http.Request) {
 	if err := g.api.SetGroupName(r.Context(), info.JID, name); err != nil {
 		fail(w, http.StatusBadGateway, "Failed to set group name: %v", err)
 		return
+	}
+	if g.onRename != nil {
+		g.onRename(info.JID, name)
 	}
 	writeJSON(w, http.StatusOK, GroupResult{Success: true, Message: fmt.Sprintf("Renamed to %q", name)})
 }
