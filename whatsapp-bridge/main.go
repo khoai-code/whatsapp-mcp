@@ -864,6 +864,11 @@ func main() {
 	logger := waLog.Stdout("Client", "INFO", true)
 	logger.Infof("Starting WhatsApp client...")
 
+	if err := loadConfigFile(configFile); err != nil {
+		logger.Errorf("Failed to read %s: %v", configFile, err)
+		return
+	}
+
 	// Create database connection for storing session data
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
@@ -931,7 +936,12 @@ func main() {
 
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
+		// No ID stored, this is a new client, need to pair with phone.
+		// A QR code in a background log is useless, so only pair from a terminal.
+		if !interactive() {
+			logger.Errorf("Not paired with a phone yet. Run `make pair` in a terminal to scan the QR code.")
+			return
+		}
 		qrChan, _ := client.GetQRChannel(context.Background())
 		err = client.Connect()
 		if err != nil {

@@ -8,3 +8,7 @@ store/
 .env.*
 *.png
 !example-use.png
+!.env.example
+
+# Built bridge binary
+whatsapp-bridge/whatsapp-bridge

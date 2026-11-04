@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from mcp.server.fastmcp import FastMCP
 import formatting as fmt
+import config
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -21,6 +22,8 @@ from whatsapp import (
     recent_activity as whatsapp_recent_activity,
     bridge_call
 )
+
+config.load()
 
 # Write tools (send, group admin) are only registered when this is "true".
 # Unregistered tools are invisible to Claude, so message text can't trick it

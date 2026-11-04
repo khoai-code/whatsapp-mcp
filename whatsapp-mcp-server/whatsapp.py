@@ -24,7 +24,10 @@ def _bridge_headers() -> Dict[str, str]:
         with open(BRIDGE_TOKEN_PATH) as f:
             token = f.read().strip()
     except FileNotFoundError:
-        raise RuntimeError(f"Bridge token not found at {BRIDGE_TOKEN_PATH}. Start the WhatsApp bridge first.")
+        raise RuntimeError(
+            "WhatsApp bridge has not started yet (no API token). "
+            "Run `make status` in the whatsapp-mcp folder; if the phone isn't linked, run `make pair`."
+        )
     return {"Authorization": f"Bearer {token}"}
 
 @dataclass
