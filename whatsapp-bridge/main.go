@@ -107,6 +107,29 @@ func (store *MessageStore) StoreChat(jid, name string, lastMessageTime time.Time
 	return err
 }
 
+// RecordSent stores a message this bridge sent. WhatsApp doesn't echo our own
+// sends back as message events, so without this they never reach the DB.
+func (store *MessageStore) RecordSent(id, chatJID, sender, content string, timestamp time.Time, mediaType, filename string) error {
+	// Chat row first (messages reference chats), bumping last activity
+	// without touching the chat's name.
+	_, err := store.db.Exec(
+		`INSERT INTO chats (jid, name, last_message_time) VALUES (?, NULL, ?)
+		ON CONFLICT(jid) DO UPDATE SET last_message_time = excluded.last_message_time
+		WHERE chats.last_message_time IS NULL OR chats.last_message_time < excluded.last_message_time`,
+		chatJID, timestamp,
+	)
+	if err != nil {
+		return err
+	}
+	return store.StoreMessage(id, chatJID, sender, content, timestamp, true, mediaType, filename, "", nil, nil, nil, 0)
+}
+
+// RenameChat updates a chat's display name, e.g. after a group rename.
+func (store *MessageStore) RenameChat(jid, name string) error {
+	_, err := store.db.Exec("UPDATE chats SET name = ? WHERE jid = ?", name, jid)
+	return err
+}
+
 // Store a message in the database
 func (store *MessageStore) StoreMessage(id, chatJID, sender, content string, timestamp time.Time, isFromMe bool,
 	mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) error {
@@ -203,7 +226,7 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
-func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
+func sendWhatsAppMessage(client *whatsmeow.Client, messageStore *MessageStore, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
 	}
@@ -230,6 +253,8 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	msg := &waProto.Message{}
+	// What gets recorded locally once the send succeeds
+	sentMediaType, sentFilename := "", ""
 
 	// Check if we have media to send
 	if mediaPath != "" {
@@ -281,6 +306,14 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			mediaType = whatsmeow.MediaDocument
 			mimeType = "application/octet-stream"
 		}
+
+		sentMediaType = map[whatsmeow.MediaType]string{
+			whatsmeow.MediaImage:    "image",
+			whatsmeow.MediaAudio:    "audio",
+			whatsmeow.MediaVideo:    "video",
+			whatsmeow.MediaDocument: "document",
+		}[mediaType]
+		sentFilename = filepath.Base(mediaPath)
 
 		// Upload media to WhatsApp servers
 		resp, err := client.Upload(context.Background(), mediaData, mediaType)
@@ -362,10 +395,17 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	// Send message
-	_, err = client.SendMessage(context.Background(), recipientJID, msg)
+	sent, err := client.SendMessage(context.Background(), recipientJID, msg)
 
 	if err != nil {
 		return false, fmt.Sprintf("Error sending message: %v", err)
+	}
+
+	if client.Store.ID != nil {
+		if err := messageStore.RecordSent(sent.ID, recipientJID.String(), client.Store.ID.User, message,
+			sent.Timestamp, sentMediaType, sentFilename); err != nil {
+			fmt.Printf("Sent, but failed to record locally: %v\n", err)
+		}
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
@@ -711,6 +751,11 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	groups := &groupHandlers{
 		api:    client,
 		policy: policy,
+		onRename: func(jid types.JID, name string) {
+			if err := messageStore.RenameChat(jid.String(), name); err != nil {
+				fmt.Printf("Failed to update group name locally: %v\n", err)
+			}
+		},
 		ownIDs: func() []string {
 			if client.Store.ID == nil {
 				return nil
@@ -758,7 +803,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 		fmt.Printf("Received request to send message (%d chars, media: %t)\n", len(req.Message), req.MediaPath != "")
 
 		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, messageStore, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println("Message sent:", success)
 		// Set response headers
 		w.Header().Set("Content-Type", "application/json")
@@ -922,6 +967,14 @@ func main() {
 		case *events.HistorySync:
 			// Process history sync events
 			handleHistorySync(client, messageStore, v, logger)
+
+		case *events.GroupInfo:
+			// Keep the local chat name in step with renames made anywhere
+			if v.Name != nil {
+				if err := messageStore.RenameChat(v.JID.String(), v.Name.Name); err != nil {
+					logger.Warnf("Failed to update group name: %v", err)
+				}
+			}
 
 		case *events.Connected:
 			logger.Infof("Connected to WhatsApp")

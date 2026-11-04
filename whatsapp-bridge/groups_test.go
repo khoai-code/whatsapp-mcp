@@ -84,16 +84,21 @@ func (f *fakeGroups) MarkRead(_ context.Context, ids []types.MessageID, ts time.
 	return nil
 }
 
-func serve(t *testing.T, fake *fakeGroups, policy *writePolicy, method, path string, body interface{}) (*httptest.ResponseRecorder, GroupResult) {
-	t.Helper()
-	mux := http.NewServeMux()
-	(&groupHandlers{api: fake, policy: policy, ownIDs: func() []string { return []string{me, myLID} }}).register(mux)
+func serveOn(mux *http.ServeMux, method, path string, body interface{}) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
 	}
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, httptest.NewRequest(method, path, &buf))
+	return rec
+}
+
+func serve(t *testing.T, fake *fakeGroups, policy *writePolicy, method, path string, body interface{}) (*httptest.ResponseRecorder, GroupResult) {
+	t.Helper()
+	mux := http.NewServeMux()
+	(&groupHandlers{api: fake, policy: policy, ownIDs: func() []string { return []string{me, myLID} }}).register(mux)
+	rec := serveOn(mux, method, path, body)
 	var res GroupResult
 	json.Unmarshal(rec.Body.Bytes(), &res)
 	return rec, res
