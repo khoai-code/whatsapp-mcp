@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ const (
 	friend   = "84111111111"
 	stranger = "84999999999"
 	groupJID = "120363000000000000@g.us"
+	myLID    = "123456789012345"
 )
 
 // fakeGroups records calls instead of talking to WhatsApp.
@@ -40,19 +42,21 @@ func newFakeGroup(meAdmin, locked bool) *fakeGroups {
 	return &fakeGroups{info: info}
 }
 
-func (f *fakeGroups) GetJoinedGroups() ([]*types.GroupInfo, error) {
+func (f *fakeGroups) GetJoinedGroups(context.Context) ([]*types.GroupInfo, error) {
 	return []*types.GroupInfo{f.info}, nil
 }
-func (f *fakeGroups) GetGroupInfo(jid types.JID) (*types.GroupInfo, error) { return f.info, nil }
-func (f *fakeGroups) GetGroupInviteLink(jid types.JID, reset bool) (string, error) {
+func (f *fakeGroups) GetGroupInfo(_ context.Context, jid types.JID) (*types.GroupInfo, error) {
+	return f.info, nil
+}
+func (f *fakeGroups) GetGroupInviteLink(_ context.Context, jid types.JID, reset bool) (string, error) {
 	f.calls = append(f.calls, "invite reset="+map[bool]string{true: "true", false: "false"}[reset])
 	return "https://chat.whatsapp.com/abc", nil
 }
-func (f *fakeGroups) CreateGroup(req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
+func (f *fakeGroups) CreateGroup(_ context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error) {
 	f.calls = append(f.calls, "create "+req.Name)
 	return f.info, nil
 }
-func (f *fakeGroups) UpdateGroupParticipants(jid types.JID, ps []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
+func (f *fakeGroups) UpdateGroupParticipants(_ context.Context, jid types.JID, ps []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error) {
 	f.calls = append(f.calls, string(action))
 	out := make([]types.GroupParticipant, len(ps))
 	for i, p := range ps {
@@ -63,19 +67,19 @@ func (f *fakeGroups) UpdateGroupParticipants(jid types.JID, ps []types.JID, acti
 	}
 	return out, nil
 }
-func (f *fakeGroups) SetGroupName(jid types.JID, name string) error {
+func (f *fakeGroups) SetGroupName(_ context.Context, jid types.JID, name string) error {
 	f.calls = append(f.calls, "name "+name)
 	return nil
 }
-func (f *fakeGroups) SetGroupTopic(jid types.JID, prev, newID, topic string) error {
+func (f *fakeGroups) SetGroupTopic(_ context.Context, jid types.JID, prev, newID, topic string) error {
 	f.calls = append(f.calls, "topic prev="+prev+" "+topic)
 	return nil
 }
-func (f *fakeGroups) LeaveGroup(jid types.JID) error {
+func (f *fakeGroups) LeaveGroup(_ context.Context, jid types.JID) error {
 	f.calls = append(f.calls, "leave")
 	return nil
 }
-func (f *fakeGroups) MarkRead(ids []types.MessageID, ts time.Time, chat, sender types.JID, _ ...types.ReceiptType) error {
+func (f *fakeGroups) MarkRead(_ context.Context, ids []types.MessageID, ts time.Time, chat, sender types.JID, _ ...types.ReceiptType) error {
 	f.calls = append(f.calls, "read "+string(ids[0])+" sender="+sender.User)
 	return nil
 }
@@ -83,7 +87,7 @@ func (f *fakeGroups) MarkRead(ids []types.MessageID, ts time.Time, chat, sender 
 func serve(t *testing.T, fake *fakeGroups, policy *writePolicy, method, path string, body interface{}) (*httptest.ResponseRecorder, GroupResult) {
 	t.Helper()
 	mux := http.NewServeMux()
-	(&groupHandlers{api: fake, policy: policy, ownUser: func() string { return me }}).register(mux)
+	(&groupHandlers{api: fake, policy: policy, ownIDs: func() []string { return []string{me, myLID} }}).register(mux)
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
@@ -276,5 +280,18 @@ func TestWrongMethod(t *testing.T) {
 	rec, _ := serve(t, newFakeGroup(true, false), writeOn(), http.MethodGet, "/api/group/leave", nil)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("GET leave: %d", rec.Code)
+	}
+}
+
+// Newer groups can list members by LID only; the admin check must still find you.
+func TestAdminMatchedByLID(t *testing.T) {
+	fake := newFakeGroup(false, false)
+	fake.info.Participants = append(fake.info.Participants, types.GroupParticipant{
+		JID: types.NewJID(myLID, types.HiddenUserServer), IsAdmin: true,
+	})
+	rec, _ := serve(t, fake, writeOn(), http.MethodPost, "/api/group/participants",
+		GroupRequest{GroupJID: groupJID, Action: "remove", Participants: []string{friend}})
+	if rec.Code != http.StatusOK {
+		t.Errorf("admin by LID: status %d, want 200", rec.Code)
 	}
 }
