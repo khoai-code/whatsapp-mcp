@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,25 +13,25 @@ import (
 )
 
 // groupAPI is the subset of *whatsmeow.Client used for groups. Keeping it
-// narrow lets tests use a fake and keeps a future whatsmeow upgrade (which
-// adds context.Context to these calls) to one file.
+// narrow lets tests use a fake and keeps whatsmeow upgrades to one file.
 type groupAPI interface {
-	GetJoinedGroups() ([]*types.GroupInfo, error)
-	GetGroupInfo(jid types.JID) (*types.GroupInfo, error)
-	GetGroupInviteLink(jid types.JID, reset bool) (string, error)
-	CreateGroup(req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error)
-	UpdateGroupParticipants(jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
-	SetGroupName(jid types.JID, name string) error
-	SetGroupTopic(jid types.JID, previousID, newID, topic string) error
-	LeaveGroup(jid types.JID) error
-	MarkRead(ids []types.MessageID, timestamp time.Time, chat, sender types.JID, receiptTypeExtra ...types.ReceiptType) error
+	GetJoinedGroups(ctx context.Context) ([]*types.GroupInfo, error)
+	GetGroupInfo(ctx context.Context, jid types.JID) (*types.GroupInfo, error)
+	GetGroupInviteLink(ctx context.Context, jid types.JID, reset bool) (string, error)
+	CreateGroup(ctx context.Context, req whatsmeow.ReqCreateGroup) (*types.GroupInfo, error)
+	UpdateGroupParticipants(ctx context.Context, jid types.JID, participants []types.JID, action whatsmeow.ParticipantChange) ([]types.GroupParticipant, error)
+	SetGroupName(ctx context.Context, jid types.JID, name string) error
+	SetGroupTopic(ctx context.Context, jid types.JID, previousID, newID, topic string) error
+	LeaveGroup(ctx context.Context, jid types.JID) error
+	MarkRead(ctx context.Context, ids []types.MessageID, timestamp time.Time, chat, sender types.JID, receiptTypeExtra ...types.ReceiptType) error
 }
 
 type groupHandlers struct {
 	api    groupAPI
 	policy *writePolicy
-	// ownUser returns the paired account's user part (phone number), or "".
-	ownUser func() string
+	// ownIDs returns the paired account's user parts: phone number and, when
+	// known, LID. Groups may list members by either.
+	ownIDs func() []string
 }
 
 // Group names are limited to 25 characters by WhatsApp.
@@ -156,12 +157,17 @@ func parseUserJIDs(list []string) ([]types.JID, error) {
 }
 
 func (g *groupHandlers) isAdmin(info *types.GroupInfo) bool {
-	own := g.ownUser()
-	if own == "" {
-		return false
+	own := map[string]bool{}
+	for _, id := range g.ownIDs() {
+		if id != "" {
+			own[id] = true
+		}
 	}
 	for _, p := range info.Participants {
-		if p.JID.User == own && (p.IsAdmin || p.IsSuperAdmin) {
+		if !(p.IsAdmin || p.IsSuperAdmin) {
+			continue
+		}
+		if own[p.JID.User] || own[p.PhoneNumber.User] || own[p.LID.User] {
 			return true
 		}
 	}
@@ -171,13 +177,13 @@ func (g *groupHandlers) isAdmin(info *types.GroupInfo) bool {
 // loadGroup fetches group info and, when needAdmin is set, refuses unless the
 // paired account is an admin, so the user gets a clear error instead of a
 // raw WhatsApp 403.
-func (g *groupHandlers) loadGroup(w http.ResponseWriter, raw string, needAdmin bool) (*types.GroupInfo, bool) {
+func (g *groupHandlers) loadGroup(ctx context.Context, w http.ResponseWriter, raw string, needAdmin bool) (*types.GroupInfo, bool) {
 	jid, err := parseGroupJID(raw)
 	if err != nil {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return nil, false
 	}
-	info, err := g.api.GetGroupInfo(jid)
+	info, err := g.api.GetGroupInfo(ctx, jid)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Failed to get group info: %v", err)
 		return nil, false
@@ -202,7 +208,7 @@ func (g *groupHandlers) checkWrite(w http.ResponseWriter, targets ...string) boo
 // Read endpoints
 
 func (g *groupHandlers) listGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := g.api.GetJoinedGroups()
+	groups, err := g.api.GetJoinedGroups(r.Context())
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Failed to list groups: %v", err)
 		return
@@ -224,7 +230,7 @@ func (g *groupHandlers) groupInfo(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
-	info, ok := g.loadGroup(w, req.GroupJID, false)
+	info, ok := g.loadGroup(r.Context(), w, req.GroupJID, false)
 	if !ok {
 		return
 	}
@@ -256,12 +262,12 @@ func (g *groupHandlers) inviteLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// WhatsApp only hands invite links to admins.
-	info, ok := g.loadGroup(w, req.GroupJID, true)
+	info, ok := g.loadGroup(r.Context(), w, req.GroupJID, true)
 	if !ok {
 		return
 	}
 	// reset=false: never revoke the existing link from a read tool.
-	link, err := g.api.GetGroupInviteLink(info.JID, false)
+	link, err := g.api.GetGroupInviteLink(r.Context(), info.JID, false)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Failed to get invite link: %v", err)
 		return
@@ -290,7 +296,7 @@ func (g *groupHandlers) createGroup(w http.ResponseWriter, r *http.Request) {
 	if !g.checkWrite(w, req.Participants...) {
 		return
 	}
-	info, err := g.api.CreateGroup(whatsmeow.ReqCreateGroup{Name: name, Participants: participants})
+	info, err := g.api.CreateGroup(r.Context(), whatsmeow.ReqCreateGroup{Name: name, Participants: participants})
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Failed to create group: %v", err)
 		return
@@ -333,11 +339,11 @@ func (g *groupHandlers) updateParticipants(w http.ResponseWriter, r *http.Reques
 	if action == whatsmeow.ParticipantChangeAdd && !g.checkWrite(w, req.Participants...) {
 		return
 	}
-	info, ok := g.loadGroup(w, req.GroupJID, true)
+	info, ok := g.loadGroup(r.Context(), w, req.GroupJID, true)
 	if !ok {
 		return
 	}
-	result, err := g.api.UpdateGroupParticipants(info.JID, participants, action)
+	result, err := g.api.UpdateGroupParticipants(r.Context(), info.JID, participants, action)
 	if err != nil {
 		fail(w, http.StatusBadGateway, "Failed to %s participants: %v", req.Action, err)
 		return
@@ -378,7 +384,7 @@ func (g *groupHandlers) setName(w http.ResponseWriter, r *http.Request) {
 	if !g.checkWrite(w, req.GroupJID) {
 		return
 	}
-	info, ok := g.loadGroup(w, req.GroupJID, false)
+	info, ok := g.loadGroup(r.Context(), w, req.GroupJID, false)
 	if !ok {
 		return
 	}
@@ -386,7 +392,7 @@ func (g *groupHandlers) setName(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "Only admins can edit %q and you are not an admin", info.Name)
 		return
 	}
-	if err := g.api.SetGroupName(info.JID, name); err != nil {
+	if err := g.api.SetGroupName(r.Context(), info.JID, name); err != nil {
 		fail(w, http.StatusBadGateway, "Failed to set group name: %v", err)
 		return
 	}
@@ -401,7 +407,7 @@ func (g *groupHandlers) setDescription(w http.ResponseWriter, r *http.Request) {
 	if !g.checkWrite(w, req.GroupJID) {
 		return
 	}
-	info, ok := g.loadGroup(w, req.GroupJID, false)
+	info, ok := g.loadGroup(r.Context(), w, req.GroupJID, false)
 	if !ok {
 		return
 	}
@@ -409,7 +415,7 @@ func (g *groupHandlers) setDescription(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusForbidden, "Only admins can edit %q and you are not an admin", info.Name)
 		return
 	}
-	if err := g.api.SetGroupTopic(info.JID, info.TopicID, "", req.Description); err != nil {
+	if err := g.api.SetGroupTopic(r.Context(), info.JID, info.TopicID, "", req.Description); err != nil {
 		fail(w, http.StatusBadGateway, "Failed to set group description: %v", err)
 		return
 	}
@@ -429,7 +435,7 @@ func (g *groupHandlers) leave(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "%v", err)
 		return
 	}
-	if err := g.api.LeaveGroup(jid); err != nil {
+	if err := g.api.LeaveGroup(r.Context(), jid); err != nil {
 		fail(w, http.StatusBadGateway, "Failed to leave group: %v", err)
 		return
 	}
@@ -471,7 +477,7 @@ func (g *groupHandlers) markRead(w http.ResponseWriter, r *http.Request) {
 	for i, id := range req.MessageIDs {
 		ids[i] = types.MessageID(id)
 	}
-	if err := g.api.MarkRead(ids, time.Now(), chat, sender); err != nil {
+	if err := g.api.MarkRead(r.Context(), ids, time.Now(), chat, sender); err != nil {
 		fail(w, http.StatusBadGateway, "Failed to mark read: %v", err)
 		return
 	}
