@@ -59,6 +59,9 @@ To turn it on: **Claude → Settings → Extensions → WhatsApp → Configure**
 
 Claude asks you to approve every send.
 
+> In **Cowork**, Claude asks before every WhatsApp tool call, including reads (your organisation's
+> setting). In a normal chat you can choose "Always allow" for the read tools.
+
 ## Please read: risks
 
 - **This is unofficial.** It connects the same way WhatsApp Web does. Normal use is fine,
