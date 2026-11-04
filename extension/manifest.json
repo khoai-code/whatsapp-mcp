@@ -1,0 +1,106 @@
+{
+  "manifest_version": "0.4",
+  "name": "whatsapp-mcp",
+  "display_name": "WhatsApp",
+  "version": "0.1.1",
+  "description": "Read, search and summarise your own WhatsApp chats. Read-only unless you turn on sending.",
+  "long_description": "Links to your own WhatsApp as a linked device (like WhatsApp Web) and runs entirely on your Mac: your session and messages stay on this computer. Ask Claude to \"connect WhatsApp\" to link your phone with a code. Sending messages and group admin are off by default; turn them on in this extension's settings, ideally with an allowlist. Unofficial: never use it to bulk-send.",
+  "author": {
+    "name": "Khanh Nguyen"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/khoai-code/whatsapp-mcp"
+  },
+  "homepage": "https://github.com/khoai-code/whatsapp-mcp",
+  "license": "MIT",
+  "keywords": [
+    "whatsapp",
+    "chat",
+    "messages"
+  ],
+  "server": {
+    "type": "uv",
+    "entry_point": "server/main.py",
+    "mcp_config": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "${__dirname}",
+        "server/main.py"
+      ],
+      "env": {
+        "WHATSAPP_MCP_DATA_DIR": "${HOME}/Library/Application Support/WhatsApp MCP",
+        "WHATSAPP_MCP_BRIDGE_BIN": "${__dirname}/bin/whatsapp-bridge",
+        "WHATSAPP_MCP_BRIDGE_PORT": "8765",
+        "WHATSAPP_MCP_ALLOW_WRITE": "${user_config.allow_write}",
+        "WHATSAPP_MCP_SEND_ALLOWLIST": "${user_config.send_allowlist}",
+        "WHATSAPP_MCP_MEDIA_DIR": "${user_config.media_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "connect_whatsapp",
+      "description": "Link your phone (code or QR)"
+    },
+    {
+      "name": "whatsapp_status",
+      "description": "Connection and settings check"
+    },
+    {
+      "name": "recent_activity",
+      "description": "Which chats were busy since a time"
+    },
+    {
+      "name": "list_chats",
+      "description": "List chats"
+    },
+    {
+      "name": "list_messages",
+      "description": "Read and search messages"
+    },
+    {
+      "name": "list_groups",
+      "description": "List your groups"
+    },
+    {
+      "name": "get_group_info",
+      "description": "Group details and members"
+    },
+    {
+      "name": "search_contacts",
+      "description": "Find contacts"
+    }
+  ],
+  "tools_generated": true,
+  "compatibility": {
+    "platforms": [
+      "darwin"
+    ]
+  },
+  "user_config": {
+    "allow_write": {
+      "type": "boolean",
+      "title": "Allow sending and group admin",
+      "description": "Off: Claude can only read. On: Claude can send messages and files, and manage groups you admin, on your real account. You approve each action.",
+      "default": false,
+      "required": false
+    },
+    "send_allowlist": {
+      "type": "string",
+      "title": "Only allow writes to these chats",
+      "description": "Comma-separated phone numbers with country code, or group JIDs. Leave empty for no restriction. Strongly recommended when sending is on.",
+      "default": "",
+      "required": false
+    },
+    "media_dir": {
+      "type": "string",
+      "title": "Only send files from this folder",
+      "description": "Optional full folder path, e.g. /Users/you/WhatsAppOutbox. Leave empty to allow any file.",
+      "default": "",
+      "required": false
+    }
+  }
+}

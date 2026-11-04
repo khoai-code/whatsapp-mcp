@@ -1,9 +1,16 @@
+import atexit
 import os
+import signal
+import subprocess
+import sys
+import threading
 from datetime import datetime
 from typing import List, Dict, Any, Optional
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
+import segno
 import formatting as fmt
 import config
+import whatsapp
 from whatsapp import (
     search_contacts as whatsapp_search_contacts,
     list_messages as whatsapp_list_messages,
@@ -540,6 +547,65 @@ def whatsapp_status() -> Dict[str, Any]:
     status["write_tools_registered"] = WRITE_ENABLED
     return status
 
+def _pairing_code_text(code: str, expires_in: int) -> str:
+    pretty = f"{code[:4]}-{code[4:]}" if len(code) == 8 else code
+    return (
+        f"Your WhatsApp linking code: {pretty}\n\n"
+        "On your phone: WhatsApp → Settings → Linked devices → Link a device → "
+        "\"Link with phone number instead\", then type the code.\n"
+        f"It expires in about {expires_in} seconds. If it does, ask again for a new code."
+    )
+
+def _qr_reply(qr: str, expires_in: int):
+    """Show the QR in the chat and in Preview: some apps don't display tool images."""
+    path = os.path.join(whatsapp.DATA_DIR, "link-whatsapp.png")
+    os.makedirs(whatsapp.DATA_DIR, mode=0o700, exist_ok=True)
+    segno.make(qr, error="l").save(path, scale=10, border=3)
+    subprocess.run(["open", path], check=False)
+    return [
+        Image(path=path),
+        "Scan this QR code (also opened in Preview): on your phone, WhatsApp → Settings → "
+        "Linked devices → Link a device.\n"
+        f"QR codes change every ~20 seconds and this login window closes in about {expires_in} seconds; "
+        "if the scan fails, ask again. Pairing with your phone number instead is often easier.",
+    ]
+
+@mcp.tool()
+def connect_whatsapp(phone_number: Optional[str] = None):
+    """Link this computer to your WhatsApp account (first-time setup, or after unlinking).
+
+    Easiest: pass your own phone number with country code (e.g. "84901234567"). You get an
+    8-character code to type into WhatsApp on your phone. Without a number, shows a QR code
+    to scan instead. Safe to call when already linked: it just says so.
+
+    Args:
+        phone_number: Your own WhatsApp number with country code, digits only (optional)
+    """
+    if phone_number:
+        ok, body = bridge_call("POST", "/pair/phone", {"phone": phone_number})
+    else:
+        ok, body = bridge_call("POST", "/pair", {})
+    if not ok:
+        return f"error: {body}"
+    if body.get("state") == "paired":
+        return f"Already linked to WhatsApp as +{body.get('number')}. You can read your chats now."
+    if body.get("state") == "error":
+        return f"error: {body.get('message')}"
+    if body.get("code"):
+        return _pairing_code_text(body["code"], body.get("expires_in", 0))
+    if body.get("qr"):
+        return _qr_reply(body["qr"], body.get("expires_in", 0))
+    return "error: WhatsApp did not return a code. Try again."
+
+def _shutdown(*_):
+    whatsapp.stop_bridge()
+    sys.exit(0)
+
 if __name__ == "__main__":
-    # Initialize and run the server
+    # As a desktop extension, start the bridge right away so messages begin
+    # syncing, and stop it with the server.
+    if whatsapp.BRIDGE_BIN:
+        threading.Thread(target=whatsapp.ensure_bridge, daemon=True).start()
+        atexit.register(whatsapp.stop_bridge)
+        signal.signal(signal.SIGTERM, _shutdown)
     mcp.run(transport='stdio')

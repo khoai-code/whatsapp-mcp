@@ -12,3 +12,6 @@ store/
 
 # Built bridge binary
 whatsapp-bridge/whatsapp-bridge
+
+# Built desktop extension
+dist/

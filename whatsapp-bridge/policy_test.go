@@ -138,3 +138,12 @@ func TestWriteForbiddenIs403(t *testing.T) {
 		t.Errorf("body %q does not explain how to enable writes", rec.Body.String())
 	}
 }
+
+// An empty field in the extension's settings may arrive as the literal
+// placeholder; it must mean "unset", not a broken allowlist.
+func TestUnsubstitutedPlaceholdersAreUnset(t *testing.T) {
+	p := newPolicy(t, "${user_config.allow_write}", "${user_config.send_allowlist}", "${user_config.media_dir}")
+	if p.allowWrite || len(p.allowlist) != 0 || p.mediaDir != "" {
+		t.Errorf("policy = %+v, want everything unset", p)
+	}
+}
